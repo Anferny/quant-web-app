@@ -12,6 +12,12 @@ import concurrent.futures
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="QuantSentiment Web Terminal")
 
+# Initialize Session State for seamless switching
+if "selected_ticker" not in st.session_state:
+    st.session_state.selected_ticker = "NVDA"
+if "app_mode" not in st.session_state:
+    st.session_state.app_mode = "Deep Analysis"
+
 # NLTK Setup
 try:
     nltk.data.find('sentiment/vader_lexicon.zip')
@@ -27,40 +33,30 @@ st.markdown("""
         padding: 10px;
         border-radius: 5px;
     }
-    div[data-testid="stDataFrame"] {
-        width: 100%;
-    }
 </style>
 """, unsafe_allow_html=True)
 
 # --- CACHED FUNCTIONS ---
 
-@st.cache_data(ttl=1800) # Cache trending list for 30 minutes
+@st.cache_data(ttl=1800)
 def get_trending_tickers():
     """Scrapes Finviz for the top 20 most active/trending stocks."""
     fallback_list = ["NVDA", "TSLA", "AAPL", "AMD", "MSFT", "GOOGL", "AMZN", "META", "NFLX", "COIN", "MARA", "PLTR", "SOFI", "SPY", "QQQ", "IWM", "GME", "HOOD", "MSTR", "RIVN"]
     
-    url = "https://finviz.com/screener.ashx?v=111&s=ta_mostactive&ft=4" # Most Active + Technical
+    url = "https://finviz.com/screener.ashx?v=111&s=ta_mostactive&ft=4"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
     
     try:
         req = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(req.content, "html.parser")
         tickers = []
-        
-        # Finviz specific scraping logic
         for link in soup.find_all('a', class_='screener-link-primary'):
             text = link.text.strip()
-            # Basic validation: uppercase, 2-5 chars, no dots (avoid weird warrants)
             if text and len(text) <= 5 and text.isalpha() and text not in tickers:
                 tickers.append(text)
-                
-        if len(tickers) < 5: 
-            return fallback_list # Return fallback if scrape blocked/empty
-            
-        return tickers[:30] # Limit to top 30 to keep scan fast
-    except Exception as e:
-        return fallback_list
+        if len(tickers) < 5: return fallback_list
+        return tickers[:30]
+    except: return fallback_list
 
 @st.cache_data(ttl=300) 
 def get_stock_data(ticker, period):
@@ -129,7 +125,6 @@ def calculate_metrics(history):
 
 def scan_single_stock(ticker):
     try:
-        # Use short period for speed
         hist = get_stock_data(ticker, "6mo")
         if hist.empty: return None
         hist, squeeze = calculate_metrics(hist)
@@ -139,11 +134,9 @@ def scan_single_stock(ticker):
         pct = ((curr - prev) / prev) * 100
         rsi = hist['RSI'].iloc[-1]
         
-        # Determine Signal
         signal = "NEUTRAL"
         if rsi < 30: signal = "OVERSOLD 🟢"
         elif rsi > 70: signal = "OVERBOUGHT 🔴"
-        
         if squeeze: 
             if signal != "NEUTRAL": signal += " + SQUEEZE 🔥"
             else: signal = "SQUEEZE 🔥"
@@ -157,14 +150,18 @@ def scan_single_stock(ticker):
         }
     except: return None
 
-# --- SIDEBAR ---
+# --- SIDEBAR NAV ---
 st.sidebar.title("QUANT TERMINAL 🚀")
-mode = st.sidebar.radio("Select Mode", ["Deep Analysis", "Market Scanner"])
+
+# Mode Switcher (Controlled by Session State)
+mode = st.sidebar.radio("Select Mode", ["Deep Analysis", "Market Scanner"], key="app_mode")
 
 if mode == "Deep Analysis":
     st.sidebar.divider()
     st.sidebar.subheader("Configuration")
-    ticker = st.sidebar.text_input("Ticker Symbol", value="NVDA").upper()
+    
+    # Text Input controlled by Session State
+    ticker = st.sidebar.text_input("Ticker Symbol", key="selected_ticker").upper()
     timeframe = st.sidebar.selectbox("Timeframe", ["1mo", "3mo", "6mo", "1y", "2y"], index=2)
     
     if ticker:
@@ -181,7 +178,6 @@ if mode == "Deep Analysis":
         # --- DASHBOARD ---
         st.title(f"{ticker} Analysis")
         
-        # Metrics Row
         curr = history['Close'].iloc[-1]
         change = curr - history['Close'].iloc[-2]
         pct = (change / history['Close'].iloc[-2]) * 100
@@ -194,19 +190,14 @@ if mode == "Deep Analysis":
         
         # --- CHART ---
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
-        # Candles
         fig.add_trace(go.Candlestick(x=history.index, open=history['Open'], high=history['High'], low=history['Low'], close=history['Close'], name='Price'), row=1, col=1)
-        # BB Lines
         fig.add_trace(go.Scatter(x=history.index, y=history['Upper'], line=dict(color='rgba(0, 255, 0, 0.5)', width=1), name='Upper BB'), row=1, col=1)
         fig.add_trace(go.Scatter(x=history.index, y=history['Lower'], line=dict(color='rgba(255, 0, 0, 0.5)', width=1), name='Lower BB'), row=1, col=1)
-        # Volume
         colors = ['green' if row['Close'] > row['Open'] else 'red' for index, row in history.iterrows()]
         fig.add_trace(go.Bar(x=history.index, y=history['Volume'], marker_color=colors, name='Volume'), row=2, col=1)
-        
         fig.update_layout(height=700, template="plotly_dark", xaxis_rangeslider_visible=False, showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
         
-        # --- NEWS ---
         if not news_df.empty:
             st.subheader("Recent News")
             for _, row in news_df.iterrows():
@@ -214,19 +205,15 @@ if mode == "Deep Analysis":
 
 elif mode == "Market Scanner":
     st.title("Live Dynamic Market Scanner 📡")
-    
-    # 1. Fetch Dynamic List
+    st.info("💡 **Tip:** Click on any row to instantly analyze that ticker.")
+
     with st.spinner("Fetching today's trending stocks..."):
         trending_tickers = get_trending_tickers()
     
-    st.success(f"Found {len(trending_tickers)} active tickers today.")
-    
-    # 2. Run Scan
     if st.button("Scan Market 🚀"):
         results = []
         bar = st.progress(0)
         
-        # Threaded scanning
         with concurrent.futures.ThreadPoolExecutor() as executor:
             futures = {executor.submit(scan_single_stock, t): t for t in trending_tickers}
             completed = 0
@@ -236,28 +223,31 @@ elif mode == "Market Scanner":
                 completed += 1
                 bar.progress(completed / len(trending_tickers))
         
-        bar.empty() # Remove progress bar when done
+        bar.empty()
         
         if results:
             df = pd.DataFrame(results).set_index("Ticker")
             
-            # Sort by interesting signals first
-            df['SortKey'] = df['Signal'].apply(lambda x: 0 if x == "NEUTRAL" else 1)
-            df = df.sort_values(by=['SortKey', 'Change %'], ascending=[False, False]).drop(columns=['SortKey'])
-            
-            # Styling
-            def highlight_signal(val):
-                color = 'white'
-                if "SQUEEZE" in str(val): color = '#FFD700' # Gold
-                elif "OVERSOLD" in str(val): color = '#00FF00' # Green
-                elif "OVERBOUGHT" in str(val): color = '#FF0000' # Red
-                return f'color: {color}; font-weight: bold'
-
-            st.dataframe(
-                df.style.map(highlight_signal, subset=['Signal'])
-                  .format({"Price": "${:.2f}", "Change %": "{:+.2f}%", "RSI": "{:.1f}"}),
+            # --- INTERACTIVE DATAFRAME ---
+            # This is where the magic happens. selection_mode="single-row" allows clicking.
+            st.write("### Scan Results")
+            event = st.dataframe(
+                df.style.format({"Price": "${:.2f}", "Change %": "{:+.2f}%", "RSI": "{:.1f}"}),
                 use_container_width=True,
-                height=800
+                height=600,
+                on_select="rerun",  # Triggers a rerun when clicked
+                selection_mode="single-row"
             )
-        else:
-            st.warning("No data returned. Try again later.")
+            
+            # --- CLICK HANDLER ---
+            if event.selection.rows:
+                # Get the Ticker from the selected row index
+                selected_row_index = event.selection.rows[0]
+                clicked_ticker = df.index[selected_row_index]
+                
+                # Update Session State
+                st.session_state.selected_ticker = clicked_ticker
+                st.session_state.app_mode = "Deep Analysis"
+                
+                # Force Rerun to switch tabs immediately
+                st.rerun()
